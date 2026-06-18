@@ -34,13 +34,21 @@ class Generator:
         self.sm = {k: ShapeModel(k) for k in ("1", "blob", "0_outer", "0_inner")}
         self.o_ids = load_ids("0_outer"); self.i_ids = load_ids("0_inner")
         self.common0 = sorted(set(self.o_ids) & set(self.i_ids))
-        # --- tunables (calibrated to match the original's statistics) ---
+        # --- tunables (auto-calibrated; overridable via data/model/gen_params.json) ---
         self.occ_gain = 1.11     # #3 density: lift occupancy to hit white-fraction
         self.sigma_h = 0.42      # #1 horizontal correlation length (cells)
         self.sigma_v = 0.78      # #1 vertical correlation length (cells) > horiz
         self.blob_cap = 0.52     # blob WIDTH cap as fraction of pitch_x (no side clumps)
-        self.size_gain = 1.00    # global size; >1 closes white but oversizes 0s/chains
         self.merge_gain = 1.5    # #4 boost merge probability (orig merges undercounted)
+        self.var_clip = 0.45     # clip on per-glyph size lognormal: lower = more uniform
+        self.gain = {"0": 1.0, "1": 1.0, "blob": 1.0}  # per-class size gain (blob ↑ w/o 0/1 ↑)
+        pj = C.MODEL / "gen_params.json"
+        if pj.exists():
+            for k, v in json.loads(pj.read_text()).items():
+                if k == "gain":
+                    self.gain.update(v)
+                else:
+                    setattr(self, k, v)
 
     def _boot(self, sm, jit=0.25):
         i = self.rng.integers(len(sm.scores))
@@ -85,7 +93,7 @@ class Generator:
         for r, c in zip(rows.tolist(), cols.tolist()):
             p = self.type_p[:, r, c]; p = p / p.sum()
             t = rng.choice(("0", "1", "blob"), p=p)
-            size = self.size[t][r, c] * self.size_gain * np.exp(np.clip(rng.normal(0, logstd[t]), -0.45, 0.45))
+            size = self.size[t][r, c] * self.gain[t] * np.exp(np.clip(rng.normal(0, logstd[t]), -self.var_clip, self.var_clip))
             # bounded jitter: real glyphs stay within the cell; an unbounded
             # Gaussian tail would pull neighbours together into false merges
             cx = col_c[c] + np.clip(rng.normal(0, jdx), -1.3 * jdx, 1.3 * jdx)
