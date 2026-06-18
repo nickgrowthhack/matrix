@@ -34,6 +34,8 @@
   button.gen:hover { filter: brightness(1.08); }
   button:disabled { opacity:.5; cursor: wait; }
   input#seedIn { background: var(--panel); color:#cfe; border:1px solid var(--line); border-radius:8px; padding:7px 10px; font:inherit; font-size:12.5px; width:170px; }
+  select#outSel { background: var(--panel); color:#cfe; border:0; border-right:1px solid var(--line); padding:8px 10px; font:inherit; font-size:12.5px; min-width:180px; max-width:280px; cursor:pointer; }
+  select#outSel option { background:#161a16; color:#e8efe9; }
   .status { color: var(--muted); font-size: 12px; align-self:center; }
   main { padding: 18px 24px 48px; }
 
@@ -72,9 +74,8 @@
   </div>
   <div class="group">
     <span class="lbl">réplica</span>
-    <button class="seed on" data-src="output/generated.png" onclick="setSeed(this)">seed 7</button>
-    <button class="seed" data-src="output/generated_seed11.png" onclick="setSeed(this)">seed 11</button>
-    <button class="seed" data-src="output/generated_seed23.png" onclick="setSeed(this)">seed 23</button>
+    <select id="outSel" onchange="selectOutput(this.value)" title="escolher qualquer output"></select>
+    <button onclick="loadOutputs()" title="atualizar lista">↻</button>
   </div>
   <div class="group">
     <span class="lbl">fundo</span>
@@ -138,10 +139,10 @@ async function generate(){
   try{
     const r=await fetch(url); if(!r.ok) throw new Error('HTTP '+r.status);
     const d=await r.json();
-    document.getElementById('repImg').src=d.url;
+    await loadOutputs(d.url.split('?')[0]);   // refresh list + select the new output
+    document.getElementById('repImg').src=d.url;   // cache-busted display wins
     document.getElementById('topImg').src=d.url;
     document.getElementById('repName').textContent='seed '+d.seed;
-    document.querySelectorAll('.seed').forEach(b=>b.classList.remove('on'));
     st.textContent='seed '+d.seed+' — '+d.total+' glifos (0:'+d.placed['0']+'  1:'+d.placed['1']+'  blob:'+d.placed['blob']+')';
   }catch(e){
     st.textContent='erro: '+e.message+' — abra via http://localhost:8000/view.html (servidor FastAPI rodando)';
@@ -152,14 +153,37 @@ function setBg(btn){
   btn.classList.add('on');
   document.documentElement.style.setProperty('--imgbg', btn.dataset.bg);
 }
-function setSeed(btn){
-  document.querySelectorAll('.seed').forEach(b=>b.classList.remove('on'));
-  btn.classList.add('on');
-  const src = btn.dataset.src;
-  document.getElementById('repImg').src = src;
-  document.getElementById('repName').textContent = src.split('/').pop();
-  document.getElementById('topImg').src = src;
+function selectOutput(url){
+  document.getElementById('repImg').src = url;
+  document.getElementById('topImg').src = url;
+  document.getElementById('repName').textContent = url.split('/').pop().split('?')[0];
   syncSlider();
+}
+async function loadOutputs(keep){
+  const sel = document.getElementById('outSel');
+  let list = null;
+  try{
+    const res = await fetch('/outputs');
+    if(res.ok) list = await res.json();
+  }catch(e){ /* file:// or no server */ }
+  if(!list || !list.length){
+    // fallback so the selector is never empty (old server / opened via file://)
+    list = [
+      {name:'generated.png',         url:'output/generated.png'},
+      {name:'generated_seed11.png',  url:'output/generated_seed11.png'},
+      {name:'generated_seed23.png',  url:'output/generated_seed23.png'},
+    ];
+  }
+  const want = keep || sel.value;
+  sel.innerHTML = '';
+  for(const o of list){
+    const opt = document.createElement('option');
+    opt.value = o.url; opt.textContent = o.name;
+    sel.appendChild(opt);
+  }
+  const match = [...sel.options].find(o => o.value === want);
+  sel.value = match ? want : sel.options[0].value;
+  selectOutput(sel.value);
 }
 
 // draggable slider
@@ -181,7 +205,7 @@ window.addEventListener('pointermove',e=>{ if(drag) setPos(e.clientX); });
 window.addEventListener('pointerup',()=>drag=false);
 sw.addEventListener('click',e=>{ if(e.target.closest('.handle')) return; setPos(e.clientX); });
 window.addEventListener('resize',syncSlider);
-window.addEventListener('load',syncSlider);
+window.addEventListener('load',()=>{ syncSlider(); loadOutputs(); });
 </script>
 </body>
 </html>

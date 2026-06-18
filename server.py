@@ -39,6 +39,13 @@ def generate(seed: int | None = None):
     })
 
 
+@app.get("/outputs")
+def outputs():
+    """List generated PNGs in output/ (newest first) for the replica selector."""
+    files = sorted(C.OUTPUT.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return [{"name": p.name, "url": f"/output/{p.name}"} for p in files]
+
+
 @app.get("/")
 def root():
     return RedirectResponse("/view.html")
