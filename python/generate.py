@@ -73,6 +73,17 @@ class Generator:
         # fixed per-class scale = typical glyph size (median of the field), so every
         # element of a class is the SAME size on the grid (user's "quadradinho" model)
         self.size_const = {t: float(np.median(self.size[t])) for t in ("0", "1", "blob")}
+        # Precompute each blob mold sample's FILL (area/bbox) + solidity so the
+        # reconstruction can pick a blob whose fill matches the target — SOLID on the
+        # left, WISPY/sparse toward the right where the digits dissolve (residual A).
+        bsm = self.sm["blob"]
+        self.blob_fills = np.empty(len(bsm.scores)); self.blob_sols = np.empty(len(bsm.scores))
+        for i in range(len(bsm.scores)):
+            o = bsm.real_outline(i).astype(np.float32)
+            bb = float((o[:, 0].max() - o[:, 0].min()) * (o[:, 1].max() - o[:, 1].min()))
+            hull = abs(cv2.contourArea(cv2.convexHull(o))); a = abs(cv2.contourArea(o))
+            self.blob_fills[i] = a / bb if bb > 0 else 0.83
+            self.blob_sols[i] = a / hull if hull > 0 else 1.0
 
     def _boot(self, sm, jit=0.25, min_sol=0.0):
         # min_sol>0: reject concave/self-intersecting shapes (blobs should be convex
@@ -90,6 +101,24 @@ class Generator:
             if hull > 0 and a / hull >= min_sol:
                 return out
         return out
+
+    def _boot_blob(self, target_fill, jit=0.2, sol_floor=0.78):
+        """Sample a blob outline whose FILL (area/bbox) is near target_fill, so a
+        reconstructed blob is solid where the original is solid (left) and wispy/
+        sparse where it dissolves (right). Picks among real mold samples in a fill
+        window (keeping moderate solidity to avoid degenerate 'U' merges), else the
+        closest-fill ones. Falls back to the plain solid sampler when no target."""
+        bsm = self.sm["blob"]
+        if target_fill is None:
+            return self._boot(bsm, min_sol=0.88)
+        ok = self.blob_sols >= sol_floor
+        cand = np.where(ok & (np.abs(self.blob_fills - target_fill) < 0.06))[0]
+        if len(cand) < 8:
+            idx = np.where(ok)[0]
+            cand = idx[np.argsort(np.abs(self.blob_fills[idx] - target_fill))[:30]]
+        i = int(cand[self.rng.integers(len(cand))])
+        s = bsm.scores[i] + self.rng.standard_normal(len(bsm.sdev)) * bsm.sdev * jit
+        return bsm.coe_to_outline(bsm.mean + s @ bsm.rotation.T)
 
     def _boot0(self, jit=0.25):
         gid = self.common0[self.rng.integers(len(self.common0))]
@@ -202,7 +231,7 @@ class Generator:
             cv2.fillPoly(cov, [fi.astype(np.int32)], 0, lineType=AA)
             return fi.astype(np.int32)                  # hole, to re-punch after all glyphs
         else:
-            out = self._boot(self.sm[t], min_sol=(0.88 if t == "blob" else 0.0))
+            out = self._boot_blob(fill) if t == "blob" else self._boot(self.sm[t], min_sol=0.0)
             x, y = out[:, 0], out[:, 1]
             bx = (x.min() + x.max()) / 2.0; by = (y.min() + y.max()) / 2.0
             sx = tw / max(1e-6, x.max() - x.min()); sy = th / max(1e-6, y.max() - y.min())
