@@ -68,7 +68,10 @@ def main():
     def detect_centers(coords, pitch0, extent):
         h, _ = np.histogram(coords, bins=np.arange(0, extent + 2, 2.0))
         sm = gaussian_filter1d(h.astype(float), 1.6)
-        pk, _ = find_peaks(sm, distance=max(1, int(pitch0 * 0.6 / 2)), height=sm.max() * 0.06)
+        # min peak separation 0.72*pitch: merges spurious double-peaks (one row
+        # splitting into two close clusters) that would otherwise place rows ~50px
+        # apart -> overlapping glyphs / false vertical chains
+        pk, _ = find_peaks(sm, distance=max(1, int(pitch0 * 0.72 / 2)), height=sm.max() * 0.06)
         centers = list(pk * 2.0 + 1.0)
         med = float(np.median(np.diff(centers)))
         # fill big gaps with evenly spaced centers

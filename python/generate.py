@@ -1,16 +1,21 @@
 """Generate a new binary-code image from the extracted mold (shape + layout).
 
-For each grid cell: sample occupancy, then type (0/1/blob) from the spatial
-fields; sample a faithful outline from the EFA/PCA shape model (bootstrap);
-scale by the local size field; jitter position; rasterize with hard edges to
-match the pristine 2-color source.
+Per cell: sample occupancy from a SPATIALLY-CORRELATED field (Gaussian copula,
+anisotropic -> matches the real vertical/horizontal clustering), then type from
+the spatial fields, then a faithful outline from the EFA/PCA shape model
+(bootstrap), scaled by the local size field, jittered. Rendered into an
+anti-aliased coverage mask -> RGBA with TRANSPARENT knock-out glyphs (like the
+source), soft edges.
 """
 import json
 import numpy as np
 import cv2
+from scipy.ndimage import gaussian_filter
+from scipy.special import ndtri
 from shape_model import ShapeModel
-from pathlib import Path
 import common as C
+
+AA = cv2.LINE_AA
 
 
 def load_ids(cls):
@@ -29,6 +34,13 @@ class Generator:
         self.sm = {k: ShapeModel(k) for k in ("1", "blob", "0_outer", "0_inner")}
         self.o_ids = load_ids("0_outer"); self.i_ids = load_ids("0_inner")
         self.common0 = sorted(set(self.o_ids) & set(self.i_ids))
+        # --- tunables (calibrated to match the original's statistics) ---
+        self.occ_gain = 1.11     # #3 density: lift occupancy to hit white-fraction
+        self.sigma_h = 0.42      # #1 horizontal correlation length (cells)
+        self.sigma_v = 0.78      # #1 vertical correlation length (cells) > horiz
+        self.blob_cap = 0.52     # blob WIDTH cap as fraction of pitch_x (no side clumps)
+        self.size_gain = 1.00    # global size; >1 closes white but oversizes 0s/chains
+        self.merge_gain = 1.5    # #4 boost merge probability (orig merges undercounted)
 
     def _boot(self, sm, jit=0.25):
         i = self.rng.integers(len(sm.scores))
@@ -44,91 +56,98 @@ class Generator:
             out.append(sm.coe_to_outline(sm.mean + sc @ sm.rotation.T))
         return out  # outer, inner
 
+    def _sample_occupancy(self):
+        """Correlated-Bernoulli occupancy via a Gaussian copula: threshold an
+        anisotropically-smoothed Gaussian field at the per-cell probability.
+        Reproduces the real spatial clustering (esp. vertical), not salt & pepper.
+        """
+        nR, nC = self.s["n_rows"], self.s["n_cols"]
+        p = np.clip(self.occ * self.occ_gain, 1e-4, 1 - 1e-4)
+        z = gaussian_filter(self.rng.standard_normal((nR, nC)),
+                            sigma=(self.sigma_v, self.sigma_h), mode="nearest")
+        z = (z - z.mean()) / (z.std() + 1e-9)
+        return z <= ndtri(p)   # P(z<=ndtri(p)) = p  -> correct marginal
+
     def render(self):
         W, H = self.s["W"], self.s["H"]
         nC, nR = self.s["n_cols"], self.s["n_rows"]
-        canvas = np.full((H, W, 3), C.BG_RGB[::-1], np.uint8)  # BGR
+        cov = np.zeros((H, W), np.uint8)            # glyph coverage (255 = glyph)
         col_c = np.array(self.grid["col_centers"]); row_c = np.array(self.grid["row_centers"])
         jdx, jdy = self.s["jitter_dx_std"], self.s["jitter_dy_std"]
         logstd = self.s["size_logstd"]
+        px = self.s["pitch_x"]
         rng = self.rng
         placed = {"0": 0, "1": 0, "blob": 0}
+        occupied = self._sample_occupancy()
+        rows, cols = np.where(occupied)
 
-        for r in range(nR):
-            for c in range(nC):
-                if rng.random() > self.occ[r, c]:
-                    continue
-                p = self.type_p[:, r, c]
-                p = p / p.sum()
-                t = rng.choice(("0", "1", "blob"), p=p)
-                mult = np.exp(np.clip(rng.normal(0, logstd[t]), -0.45, 0.45))
-                size = self.size[t][r, c] * mult
+        py = self.s["pitch_y"]
+        for r, c in zip(rows.tolist(), cols.tolist()):
+            p = self.type_p[:, r, c]; p = p / p.sum()
+            t = rng.choice(("0", "1", "blob"), p=p)
+            size = self.size[t][r, c] * self.size_gain * np.exp(np.clip(rng.normal(0, logstd[t]), -0.45, 0.45))
+            # bounded jitter: real glyphs stay within the cell; an unbounded
+            # Gaussian tail would pull neighbours together into false merges
+            cx = col_c[c] + np.clip(rng.normal(0, jdx), -1.3 * jdx, 1.3 * jdx)
+            cy = row_c[r] + np.clip(rng.normal(0, jdy), -1.3 * jdy, 1.3 * jdy)
+            if t == "0":
+                outer, inner = self._boot0()
+                size = min(size, 0.85 * py / np.ptp(outer[:, 1]))   # height clamp (orig p99=64<pitch)
+                op = (outer * size + [cx, cy]).astype(np.int32)
+                ip = (inner * size + [cx, cy]).astype(np.int32)
+                cv2.fillPoly(cov, [op], 255, lineType=AA)
+                cv2.fillPoly(cov, [ip], 0, lineType=AA)       # carve the hole back
+            else:
+                out = self._boot(self.sm["1" if t == "1" else "blob"])
                 if t == "blob":
-                    # safety cap; the robust size field already keeps blobs to
-                    # single-cell width, so packed blob fields keep clean gaps.
-                    relax = max(0.0, (0.20 - self.occ[r, c]) / 0.20)
-                    size = min(size, (0.55 + 0.30 * relax) * self.s["pitch_x"])
-                cx = col_c[c] + rng.normal(0, jdx)
-                cy = row_c[r] + rng.normal(0, jdy)
-                if t == "0":
-                    outer, inner = self._boot0()
-                    op = (outer * size + [cx, cy]).astype(np.int32)
-                    ip = (inner * size + [cx, cy]).astype(np.int32)
-                    cv2.fillPoly(canvas, [op], (255, 255, 255))
-                    cv2.fillPoly(canvas, [ip], C.BG_RGB[::-1])
-                else:
-                    key = "1" if t == "1" else "blob"
-                    out = self._boot(self.sm[key])
-                    op = (out * size + [cx, cy]).astype(np.int32)
-                    cv2.fillPoly(canvas, [op], (255, 255, 255))
-                    # simple merge: extend a blob to the right neighbour
-                    if t == "blob" and c + 1 < nC and rng.random() < self.merge[r, c]:
-                        out2 = self._boot(self.sm["blob"])
-                        cx2 = col_c[c + 1] + rng.normal(0, jdx)
-                        op2 = (out2 * size + [cx2, cy]).astype(np.int32)
-                        cv2.fillPoly(canvas, [op2], (255, 255, 255))
-                placed[t] += 1
-        return canvas, placed
+                    size = min(size, self.blob_cap * px)         # width cap (no side clumps)
+                size = min(size, 0.85 * py / np.ptp(out[:, 1]))  # height clamp (no vertical chains)
+                op = (out * size + [cx, cy]).astype(np.int32)
+                cv2.fillPoly(cov, [op], 255, lineType=AA)
+                # #4 merge: a second blob overlapping the right side -> peanut/'W'
+                if t == "blob" and c + 1 < nC and rng.random() < self.merge[r, c] * self.merge_gain:
+                    out2 = self._boot(self.sm["blob"])
+                    op2 = (out2 * size + [cx + 0.62 * px, cy]).astype(np.int32)
+                    cv2.fillPoly(cov, [op2], 255, lineType=AA)
+            placed[t] += 1
+        return cov, placed
 
 
-def to_rgba(img):
-    """BGR canvas -> BGRA with glyphs (white) as transparent knock-outs."""
-    white = np.all(img == 255, axis=2)
-    alpha = np.where(white, 0, 255).astype(np.uint8)
-    return np.dstack([img, alpha])
+def cov_to_bgr(cov):
+    """Coverage -> BGR, white glyphs on the dark layer (for side-by-side display)."""
+    c = cov.astype(np.float32) / 255.0
+    bg = np.array(C.BG_RGB[::-1], np.float32)
+    return (bg[None, None, :] * (1 - c)[..., None] + 255.0 * c[..., None]).astype(np.uint8)
+
+
+def cov_to_bgra(cov):
+    """Coverage -> BGRA knock-out: glyphs transparent (soft alpha), dark opaque."""
+    return np.dstack([cov_to_bgr(cov), (255 - cov).astype(np.uint8)])
 
 
 def render_rgba(gen, seed):
-    """Re-render with a given seed reusing an already-loaded Generator."""
     gen.rng = np.random.default_rng(seed)
-    img, placed = gen.render()
-    return to_rgba(img), placed
+    cov, placed = gen.render()
+    return cov_to_bgra(cov), placed
 
 
 def main():
     import sys
     seed = int(sys.argv[1]) if len(sys.argv) > 1 else 7
     g = Generator(seed=seed)
-    img, placed = g.render()
+    cov, placed = g.render()
     out = C.OUTPUT / (f"generated_seed{seed}.png" if seed != 7 else "generated.png")
-    # faithful to the source: glyphs are TRANSPARENT knock-outs in the dark layer
-    # (the source is RGBA with alpha=0 on the glyphs), not opaque white.
-    white = np.all(img == 255, axis=2)
-    alpha = np.where(white, 0, 255).astype(np.uint8)
-    cv2.imwrite(str(out), np.dstack([img, alpha]))
+    cv2.imwrite(str(out), cov_to_bgra(cov))
     print(f"wrote {out}  placed glyphs: {placed} total={sum(placed.values())}")
-    # thumbnail + 1:1 crop comparison vs original
-    thumb = cv2.resize(img, (img.shape[1] // 10, img.shape[0] // 10))
-    cv2.imwrite(str(C.REPORTS / "gen_thumb.png"), thumb)
+    img = cov_to_bgr(cov)
     orig = cv2.imread(str(C.SRC))
+    thumb = cv2.resize(img, (img.shape[1] // 10, img.shape[0] // 10))
     ot = cv2.resize(orig, (orig.shape[1] // 10, orig.shape[0] // 10))
     sep = np.full((thumb.shape[0], 8, 3), (0, 180, 0), np.uint8)
     cv2.imwrite(str(C.REPORTS / "gen_vs_orig_thumb.png"), np.hstack([ot, sep, thumb]))
-    # 1:1 crops (top-left dense + a mid band)
     cw, ch = 1000, 700
-    crop_g = img[:ch, :cw]; crop_o = orig[:ch, :cw]
     cv2.imwrite(str(C.REPORTS / "gen_vs_orig_crop.png"),
-                np.hstack([crop_o, np.full((ch, 8, 3), (0, 180, 0), np.uint8), crop_g]))
+                np.hstack([orig[:ch, :cw], np.full((ch, 8, 3), (0, 180, 0), np.uint8), img[:ch, :cw]]))
     print("wrote reports/gen_vs_orig_thumb.png and gen_vs_orig_crop.png")
 
 

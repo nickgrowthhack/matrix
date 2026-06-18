@@ -65,6 +65,10 @@ def main():
             continue
         occ[r, k] = 1
         cnt[base][r, k] += 1
+        # broaden merge detection: a single blob component wider than ~1 cell is a
+        # fused pair (the width metric misses small ones, so this stays a lower bound)
+        if base == "blob" and c["w"] > 1.25 * px:
+            merge[r, k] = 1
         dx_list.append(c["cx"] - col_c[k]); dy_list.append(c["cy"] - row_c[r])
         # robust size: skip likely partial-merges (too wide) and clip the rms so a
         # few fused blobs don't inflate the local size field (which caused clumps)
