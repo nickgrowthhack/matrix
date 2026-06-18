@@ -174,11 +174,14 @@ async function loadOutputs(keep){
       {name:'generated_seed23.png',  url:'output/generated_seed23.png'},
     ];
   }
+  // newest first by epoch mtime (server already sorts; guard client-side too)
+  list.sort((a, b) => (b.m || 0) - (a.m || 0));
   const want = keep || sel.value;
   sel.innerHTML = '';
   for(const o of list){
     const opt = document.createElement('option');
-    opt.value = o.url; opt.textContent = o.name;
+    opt.value = o.url;
+    opt.textContent = o.ts ? `${o.ts}  ·  ${o.name}` : o.name;
     sel.appendChild(opt);
   }
   const match = [...sel.options].find(o => o.value === want);

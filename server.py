@@ -41,9 +41,12 @@ def generate(seed: int | None = None):
 
 @app.get("/outputs")
 def outputs():
-    """List generated PNGs in output/ (newest first) for the replica selector."""
+    """List generated PNGs in output/ NEWEST FIRST, with a readable timestamp."""
+    import time
     files = sorted(C.OUTPUT.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
-    return [{"name": p.name, "url": f"/output/{p.name}"} for p in files]
+    return [{"name": p.name, "url": f"/output/{p.name}", "m": p.stat().st_mtime,
+             "ts": time.strftime("%d/%m %H:%M", time.localtime(p.stat().st_mtime))}
+            for p in files]
 
 
 @app.get("/")
