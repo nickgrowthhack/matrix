@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Matrix — Original × Réplica</title>
+<style>
+  :root { --bg:#0c0e0c; --panel:#161a16; --line:#2a302a; --accent:#19d36b; --muted:#8aa092; --imgbg:#ffffff; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: #e8efe9;
+    font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  }
+  header { padding: 20px 24px 8px; }
+  h1 { margin: 0; font-size: 18px; letter-spacing: .5px; font-weight: 600; }
+  h1 .b { color: var(--accent); }
+  p.sub { margin: 6px 0 0; color: var(--muted); font-size: 12.5px; }
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+    padding: 14px 24px; position: sticky; top: 0; z-index: 5;
+    background: linear-gradient(var(--bg), rgba(12,14,12,.9)); backdrop-filter: blur(4px);
+    border-bottom: 1px solid var(--line);
+  }
+  .group { display: flex; gap: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .group .lbl { padding: 8px 10px; color: var(--muted); font-size: 12px; align-self: center; }
+  button {
+    background: var(--panel); color: #cfe; border: 0; border-left: 1px solid var(--line);
+    padding: 8px 14px; cursor: pointer; font: inherit; font-size: 12.5px; transition: .15s;
+  }
+  button:first-child { border-left: 0; }
+  button:hover { background: #1f261f; }
+  button.on { background: var(--accent); color: #06210f; font-weight: 700; }
+  button.gen { border-left: 0; background: var(--accent); color:#06210f; font-weight:700; }
+  button.gen:hover { filter: brightness(1.08); }
+  button:disabled { opacity:.5; cursor: wait; }
+  input#seedIn { background: var(--panel); color:#cfe; border:1px solid var(--line); border-radius:8px; padding:7px 10px; font:inherit; font-size:12.5px; width:170px; }
+  .status { color: var(--muted); font-size: 12px; align-self:center; }
+  main { padding: 18px 24px 48px; }
+
+  /* side-by-side */
+  .sbs { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .card .tag { padding: 8px 12px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--line); display:flex; justify-content:space-between;}
+  .card .tag b { color: var(--accent); }
+  .card img { display: block; width: 100%; height: auto; background: var(--imgbg); }
+
+  /* slider compare */
+  .slider-wrap { position: relative; max-width: 1200px; margin: 0 auto; border:1px solid var(--line); border-radius:10px; overflow:hidden; user-select:none; background: var(--imgbg); }
+  .slider-wrap img { display:block; width:100%; height:auto; background:transparent; }
+  .slider-wrap .top { position:absolute; inset:0; overflow:hidden; width:50%; border-right:2px solid var(--accent); background: var(--imgbg); }
+  .slider-wrap .top img { width: var(--fullw, 1200px); max-width:none; }
+  .handle { position:absolute; top:0; bottom:0; left:50%; width:36px; transform:translateX(-50%); cursor:ew-resize; display:flex; align-items:center; justify-content:center; }
+  .handle .knob { width:36px; height:36px; border-radius:50%; background:var(--accent); color:#06210f; display:flex; align-items:center; justify-content:center; font-weight:800; box-shadow:0 2px 10px rgba(0,0,0,.5); }
+  .chip { position:absolute; top:10px; padding:4px 9px; font-size:11px; border-radius:6px; background:rgba(0,0,0,.6); color:#cfe; }
+  .chip.l { left:10px; } .chip.r { right:10px; }
+  .hide { display:none !important; }
+  footer { color: var(--muted); font-size: 11.5px; padding: 0 24px 30px; max-width: 980px; }
+  code { color:#bfe; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Matrix — <span class="b">original</span> × réplica gerada pelo molde</h1>
+  <p class="sub">Molde extraído via Momocs (EFA+PCA das formas) + modelo de composição. Compare lado a lado ou arraste o divisor.</p>
+</header>
+
+<div class="controls">
+  <div class="group">
+    <span class="lbl">vista</span>
+    <button id="mSbs" class="on" onclick="setMode('sbs')">lado a lado</button>
+    <button id="mSlide" onclick="setMode('slide')">slider</button>
+  </div>
+  <div class="group">
+    <span class="lbl">réplica</span>
+    <button class="seed on" data-src="output/generated.png" onclick="setSeed(this)">seed 7</button>
+    <button class="seed" data-src="output/generated_seed11.png" onclick="setSeed(this)">seed 11</button>
+    <button class="seed" data-src="output/generated_seed23.png" onclick="setSeed(this)">seed 23</button>
+  </div>
+  <div class="group">
+    <span class="lbl">fundo</span>
+    <button class="bg on" data-bg="#ffffff" onclick="setBg(this)">branco</button>
+    <button class="bg" data-bg="#9aa0a0" onclick="setBg(this)">cinza</button>
+    <button class="bg" data-bg="#0b8a3e" onclick="setBg(this)">verde</button>
+    <button class="bg" data-bg="#323332" onclick="setBg(this)">escuro</button>
+  </div>
+  <div class="group">
+    <span class="lbl">gerar</span>
+    <input id="seedIn" type="number" placeholder="seed (vazio = aleatório)" />
+    <button id="genBtn" class="gen" onclick="generate()">⚡ nova variação</button>
+  </div>
+  <span id="genStatus" class="status"></span>
+</div>
+
+<main>
+  <section id="sbs" class="sbs">
+    <div class="card">
+      <div class="tag"><span>ORIGINAL</span><b>background.png</b></div>
+      <img src="background.png" alt="original">
+    </div>
+    <div class="card">
+      <div class="tag"><span>RÉPLICA</span><b id="repName">generated.png</b></div>
+      <img id="repImg" src="output/generated.png" alt="réplica">
+    </div>
+  </section>
+
+  <section id="slide" class="hide">
+    <div class="slider-wrap" id="sw">
+      <img src="background.png" alt="original base" id="baseImg">
+      <div class="top" id="top"><img src="output/generated.png" alt="réplica" id="topImg"></div>
+      <span class="chip l">réplica</span>
+      <span class="chip r">original</span>
+      <div class="handle" id="handle"><div class="knob">⇄</div></div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  Os glifos são <b>transparentes</b> nas duas imagens (o original é uma camada escura
+  com recortes vazados; a réplica reproduz isso). Por isso há o seletor de <b>fundo</b>:
+  num fundo escuro os glifos somem. No modo <b>slider</b>, à esquerda do divisor aparece
+  a <b>réplica</b>, à direita o <b>original</b>.
+  Gere novas variações com <code>.venv\Scripts\python.exe python\generate.py &lt;seed&gt;</code>.
+</footer>
+
+<script>
+function setMode(m){
+  document.getElementById('sbs').classList.toggle('hide', m!=='sbs');
+  document.getElementById('slide').classList.toggle('hide', m!=='slide');
+  document.getElementById('mSbs').classList.toggle('on', m==='sbs');
+  document.getElementById('mSlide').classList.toggle('on', m==='slide');
+  if(m==='slide') syncSlider();
+}
+async function generate(){
+  const btn=document.getElementById('genBtn'), st=document.getElementById('genStatus');
+  const sv=document.getElementById('seedIn').value.trim();
+  const url='/generate'+(sv!==''?('?seed='+encodeURIComponent(sv)):'');
+  const old=btn.textContent; btn.disabled=true; btn.textContent='gerando…'; st.textContent='';
+  try{
+    const r=await fetch(url); if(!r.ok) throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    document.getElementById('repImg').src=d.url;
+    document.getElementById('topImg').src=d.url;
+    document.getElementById('repName').textContent='seed '+d.seed;
+    document.querySelectorAll('.seed').forEach(b=>b.classList.remove('on'));
+    st.textContent='seed '+d.seed+' — '+d.total+' glifos (0:'+d.placed['0']+'  1:'+d.placed['1']+'  blob:'+d.placed['blob']+')';
+  }catch(e){
+    st.textContent='erro: '+e.message+' — abra via http://localhost:8000/view.html (servidor FastAPI rodando)';
+  }finally{ btn.disabled=false; btn.textContent=old; }
+}
+function setBg(btn){
+  document.querySelectorAll('.bg').forEach(b=>b.classList.remove('on'));
+  btn.classList.add('on');
+  document.documentElement.style.setProperty('--imgbg', btn.dataset.bg);
+}
+function setSeed(btn){
+  document.querySelectorAll('.seed').forEach(b=>b.classList.remove('on'));
+  btn.classList.add('on');
+  const src = btn.dataset.src;
+  document.getElementById('repImg').src = src;
+  document.getElementById('repName').textContent = src.split('/').pop();
+  document.getElementById('topImg').src = src;
+  syncSlider();
+}
+
+// draggable slider
+const sw=document.getElementById('sw'), top=document.getElementById('top'), handle=document.getElementById('handle');
+function syncSlider(){
+  // match the clipped (top) image width to the wrapper so it doesn't scale-shift
+  document.documentElement.style.setProperty('--fullw', sw.clientWidth+'px');
+}
+function setPos(clientX){
+  const r=sw.getBoundingClientRect();
+  let x=Math.max(0,Math.min(clientX-r.left, r.width));
+  const pct=x/r.width*100;
+  top.style.width=pct+'%';
+  handle.style.left=pct+'%';
+}
+let drag=false;
+handle.addEventListener('pointerdown',e=>{drag=true; handle.setPointerCapture(e.pointerId);});
+window.addEventListener('pointermove',e=>{ if(drag) setPos(e.clientX); });
+window.addEventListener('pointerup',()=>drag=false);
+sw.addEventListener('click',e=>{ if(e.target.closest('.handle')) return; setPos(e.clientX); });
+window.addEventListener('resize',syncSlider);
+window.addEventListener('load',syncSlider);
+</script>
+</body>
+</html>

@@ -1,0 +1,45 @@
+# ---- Python ----
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ---- R ----
+.Rhistory
+.RData
+.Rproj.user/
+# R session dumps from s4 (regenerable; the app reads the CSVs, not the .rds)
+*.rds
+
+# ---- Node (caso o front evolua) ----
+node_modules/
+npm-debug.log*
+
+# ---- Scratch / reconhecimento (raws grandes, scripts exploratórios) ----
+_recon/
+
+# ---- Artefatos intermediários do pipeline (regeneráveis via run_pipeline.ps1) ----
+data/interim/
+data/glyphs/
+
+# ---- Imagens geradas ----
+# Versiona só as amostras que o view.html referencia; ignora o resto que se acumula.
+output/*
+!output/generated.png
+!output/generated_seed11.png
+!output/generated_seed23.png
+
+# ---- SO / editores / ferramentas ----
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+.claude/settings.local.json
+
+# Mantidos no repo (NÃO ignorados), de propósito:
+#   background.png        -> imagem-fonte (necessária pra reconstruir o molde)
+#   data/model/           -> o "molde" extraído (deixa o app rodar sem R+Momocs)
+#   reports/              -> visuais de validação (linkados no README)
