@@ -163,7 +163,7 @@ function setSeed(btn){
 }
 
 // draggable slider
-const sw=document.getElementById('sw'), top=document.getElementById('top'), handle=document.getElementById('handle');
+const sw=document.getElementById('sw'), topEl=document.getElementById('top'), handle=document.getElementById('handle');
 function syncSlider(){
   // match the clipped (top) image width to the wrapper so it doesn't scale-shift
   document.documentElement.style.setProperty('--fullw', sw.clientWidth+'px');
@@ -172,7 +172,7 @@ function setPos(clientX){
   const r=sw.getBoundingClientRect();
   let x=Math.max(0,Math.min(clientX-r.left, r.width));
   const pct=x/r.width*100;
-  top.style.width=pct+'%';
+  topEl.style.width=pct+'%';
   handle.style.left=pct+'%';
 }
 let drag=false;
