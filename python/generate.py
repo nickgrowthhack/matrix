@@ -41,6 +41,9 @@ class Generator:
         self.blob_cap = 0.52     # blob WIDTH cap as fraction of pitch_x (no side clumps)
         self.merge_gain = 1.5    # #4 boost merge probability (orig merges undercounted)
         self.var_clip = 0.45     # clip on per-glyph size lognormal: lower = more uniform
+        self.gap = 2             # collision: min clear pixels kept between glyphs
+        self.collision = True    # shrink a glyph locally if it would touch a placed one
+        self.fit_steps = 4
         self.gain = {"0": 1.0, "1": 1.0, "blob": 1.0}  # per-class size gain (blob ↑ w/o 0/1 ↑)
         pj = C.MODEL / "gen_params.json"
         if pj.exists():
@@ -76,6 +79,30 @@ class Generator:
         z = (z - z.mean()) / (z.std() + 1e-9)
         return z <= ndtri(p)   # P(z<=ndtri(p)) = p  -> correct marginal
 
+    def _fit(self, out, cx, cy, size, cov, kernel):
+        """Shrink `size` until the glyph keeps a `gap`-px clearance from already
+        placed glyphs. Lets glyphs be full-size (more white) yet never touch
+        (no chains) — only crowded spots shrink. Returns the fitted size."""
+        H, W = cov.shape
+        g = self.gap
+        for _ in range(self.fit_steps):
+            pts = out * size + [cx, cy]
+            x, y, wd, ht = cv2.boundingRect(pts.astype(np.int32))
+            x0, y0 = max(0, x - g - 1), max(0, y - g - 1)
+            x1, y1 = min(W, x + wd + g + 1), min(H, y + ht + g + 1)
+            if x1 <= x0 or y1 <= y0:
+                return size
+            ex = (cov[y0:y1, x0:x1] > 0).astype(np.uint8)
+            if not ex.any():
+                return size
+            cand = np.zeros_like(ex)
+            cv2.fillPoly(cand, [(pts - [x0, y0]).astype(np.int32)], 1)
+            if np.any(cand & cv2.dilate(ex, kernel)):
+                size *= 0.88
+            else:
+                return size
+        return size
+
     def render(self):
         W, H = self.s["W"], self.s["H"]
         nC, nR = self.s["n_cols"], self.s["n_rows"]
@@ -90,33 +117,35 @@ class Generator:
         rows, cols = np.where(occupied)
 
         py = self.s["pitch_y"]
+        SAFE = 1.10  # loose height safety; collision does the real spacing
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * self.gap + 1, 2 * self.gap + 1))
         for r, c in zip(rows.tolist(), cols.tolist()):
             p = self.type_p[:, r, c]; p = p / p.sum()
             t = rng.choice(("0", "1", "blob"), p=p)
             size = self.size[t][r, c] * self.gain[t] * np.exp(np.clip(rng.normal(0, logstd[t]), -self.var_clip, self.var_clip))
-            # bounded jitter: real glyphs stay within the cell; an unbounded
-            # Gaussian tail would pull neighbours together into false merges
+            # bounded jitter: real glyphs stay within the cell
             cx = col_c[c] + np.clip(rng.normal(0, jdx), -1.3 * jdx, 1.3 * jdx)
             cy = row_c[r] + np.clip(rng.normal(0, jdy), -1.3 * jdy, 1.3 * jdy)
             if t == "0":
                 outer, inner = self._boot0()
-                size = min(size, 0.85 * py / np.ptp(outer[:, 1]))   # height clamp (orig p99=64<pitch)
-                op = (outer * size + [cx, cy]).astype(np.int32)
-                ip = (inner * size + [cx, cy]).astype(np.int32)
-                cv2.fillPoly(cov, [op], 255, lineType=AA)
-                cv2.fillPoly(cov, [ip], 0, lineType=AA)       # carve the hole back
+                size = min(size, SAFE * py / np.ptp(outer[:, 1]))
+                if self.collision:
+                    size = self._fit(outer, cx, cy, size, cov, kernel)
+                cv2.fillPoly(cov, [(outer * size + [cx, cy]).astype(np.int32)], 255, lineType=AA)
+                cv2.fillPoly(cov, [(inner * size + [cx, cy]).astype(np.int32)], 0, lineType=AA)
             else:
                 out = self._boot(self.sm["1" if t == "1" else "blob"])
                 if t == "blob":
-                    size = min(size, self.blob_cap * px)         # width cap (no side clumps)
-                size = min(size, 0.85 * py / np.ptp(out[:, 1]))  # height clamp (no vertical chains)
-                op = (out * size + [cx, cy]).astype(np.int32)
-                cv2.fillPoly(cov, [op], 255, lineType=AA)
-                # #4 merge: a second blob overlapping the right side -> peanut/'W'
+                    size = min(size, self.blob_cap * px)
+                size = min(size, SAFE * py / np.ptp(out[:, 1]))
+                if self.collision:
+                    size = self._fit(out, cx, cy, size, cov, kernel)
+                cv2.fillPoly(cov, [(out * size + [cx, cy]).astype(np.int32)], 255, lineType=AA)
+                # #4 authentic 'W' merge: a 2nd blob deliberately overlapping the
+                # first (NOT collision-checked) -> the only intended touching
                 if t == "blob" and c + 1 < nC and rng.random() < self.merge[r, c] * self.merge_gain:
                     out2 = self._boot(self.sm["blob"])
-                    op2 = (out2 * size + [cx + 0.62 * px, cy]).astype(np.int32)
-                    cv2.fillPoly(cov, [op2], 255, lineType=AA)
+                    cv2.fillPoly(cov, [(out2 * size + [cx + 0.62 * px, cy]).astype(np.int32)], 255, lineType=AA)
             placed[t] += 1
         return cov, placed
 

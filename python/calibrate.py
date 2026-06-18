@@ -78,9 +78,11 @@ def loss(m, tgt):
     return L
 
 
+# collision-placement regime (gap from gen_params.json = 1): white is no longer
+# capped, so bounds let glyphs be large; var_clip raised (collision lowers spread).
 PARAMS = ["occ_gain", "sigma_h", "sigma_v", "blob_cap", "merge_gain", "gain1", "gainb", "var_clip"]
-BOUNDS = [(0.98, 1.25), (0.20, 0.95), (0.40, 1.35), (0.44, 0.64), (0.3, 4.0), (0.92, 1.12), (0.92, 1.32), (0.20, 0.50)]
-X0 = [1.07, 0.33, 0.78, 0.55, 1.47, 1.02, 1.10, 0.38]
+BOUNDS = [(0.95, 1.25), (0.20, 0.95), (0.40, 1.35), (0.45, 0.80), (0.3, 3.0), (0.92, 1.20), (0.92, 1.40), (0.25, 0.65)]
+X0 = [1.05, 0.33, 0.64, 0.60, 1.8, 1.02, 1.08, 0.50]
 SEED = 12345
 
 
@@ -114,11 +116,12 @@ def main():
         return L
 
     res = minimize(objective, X0, method="Powell", bounds=BOUNDS,
-                   options={"maxfev": 160, "xtol": 1e-2, "ftol": 1e-2})
+                   options={"maxfev": 120, "xtol": 1e-2, "ftol": 1e-2})
 
     xb = hist["x"]
     params = {"occ_gain": xb[0], "sigma_h": xb[1], "sigma_v": xb[2],
               "blob_cap": xb[3], "merge_gain": xb[4], "var_clip": xb[7],
+              "gap": int(gen.gap),
               "gain": {"0": 1.0, "1": xb[5], "blob": xb[6]}}
     (C.MODEL / "gen_params.json").write_text(json.dumps(params, indent=2))
     print("\nSAVED gen_params.json:", json.dumps(params))
