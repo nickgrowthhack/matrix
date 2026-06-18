@@ -1,14 +1,20 @@
 {
-  "occ_gain": 1.0645898033750316,
-  "sigma_h": 0.33,
-  "sigma_v": 0.64,
+  "occ_gain": 1.02,
+  "sigma_h": 0.30,
+  "sigma_v": 0.50,
   "blob_cap": 0.6,
   "merge_gain": 1.8,
   "var_clip": 0.5,
   "gap": 1,
+  "overlap_tol": 0,
   "gain": {
     "0": 1.0,
     "1": 1.02,
     "blob": 1.08
+  },
+  "size_var": {
+    "0": 0.21,
+    "1": 0.35,
+    "blob": 0.10
   }
 }

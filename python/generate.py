@@ -43,8 +43,10 @@ class Generator:
         self.var_clip = 0.45     # clip on per-glyph size lognormal: lower = more uniform
         self.gap = 2             # collision: min clear pixels kept between glyphs
         self.collision = True    # shrink a glyph locally if it would touch a placed one
+        self.overlap_tol = 0     # px of contact allowed before shrinking
         self.fit_steps = 4
         self.gain = {"0": 1.0, "1": 1.0, "blob": 1.0}  # per-class size gain (blob ↑ w/o 0/1 ↑)
+        self.size_var = {"0": 0.0, "1": 0.0, "blob": 0.0}  # extra size log-std (collision compresses spread)
         pj = C.MODEL / "gen_params.json"
         if pj.exists():
             for k, v in json.loads(pj.read_text()).items():
@@ -97,7 +99,9 @@ class Generator:
                 return size
             cand = np.zeros_like(ex)
             cv2.fillPoly(cand, [(pts - [x0, y0]).astype(np.int32)], 1)
-            if np.any(cand & cv2.dilate(ex, kernel)):
+            # allow a little contact (overlap_tol px) so glyphs keep their size
+            # spread and the authentic ~few touches survive; shrink only past it
+            if int((cand & cv2.dilate(ex, kernel)).sum()) > self.overlap_tol:
                 size *= 0.88
             else:
                 return size
@@ -122,7 +126,8 @@ class Generator:
         for r, c in zip(rows.tolist(), cols.tolist()):
             p = self.type_p[:, r, c]; p = p / p.sum()
             t = rng.choice(("0", "1", "blob"), p=p)
-            size = self.size[t][r, c] * self.gain[t] * np.exp(np.clip(rng.normal(0, logstd[t]), -self.var_clip, self.var_clip))
+            lt = logstd[t] + self.size_var[t]
+            size = self.size[t][r, c] * self.gain[t] * np.exp(np.clip(rng.normal(0, lt), -self.var_clip, self.var_clip))
             # bounded jitter: real glyphs stay within the cell
             cx = col_c[c] + np.clip(rng.normal(0, jdx), -1.3 * jdx, 1.3 * jdx)
             cy = row_c[r] + np.clip(rng.normal(0, jdy), -1.3 * jdy, 1.3 * jdy)
