@@ -31,9 +31,14 @@ class Generator:
         self.size = {"0": d["size_0"], "1": d["size_1"], "blob": d["size_blob"]}
         self.s = json.loads((C.MODEL / "layout_scalars.json").read_text())
         self.grid = json.loads((C.INTERIM / "grid.json").read_text())
+        self._colc = np.array(self.grid["col_centers"]); self._rowc = np.array(self.grid["row_centers"])
         self.sm = {k: ShapeModel(k) for k in ("1", "blob", "0_outer", "0_inner")}
         self.o_ids = load_ids("0_outer"); self.i_ids = load_ids("0_inner")
         self.common0 = sorted(set(self.o_ids) & set(self.i_ids))
+        # id -> score-row, per class, so reconstruction can use each glyph's OWN shape
+        self.id2row = {"1": load_ids("1"), "blob": load_ids("blob"),
+                       "0_outer": self.o_ids, "0_inner": self.i_ids}
+        self._props = None  # lazy regionprops for exact-contour fallback
         # --- tunables (auto-calibrated; overridable via data/model/gen_params.json) ---
         self.occ_gain = 1.11     # #3 density: lift occupancy to hit white-fraction
         self.sigma_h = 0.42      # #1 horizontal correlation length (cells)
@@ -47,18 +52,36 @@ class Generator:
         self.fit_steps = 4
         self.gain = {"0": 1.0, "1": 1.0, "blob": 1.0}  # per-class size gain (blob ↑ w/o 0/1 ↑)
         self.size_var = {"0": 0.0, "1": 0.0, "blob": 0.0}  # extra size log-std (collision compresses spread)
+        # per-class: True = one fixed scale (strict "quadradinho" look); False = use
+        # the position field. 0/1 are uniform in the source; blobs grow into the dissolve.
+        self.uniform_size = {"0": True, "1": True, "blob": False}
         pj = C.MODEL / "gen_params.json"
         if pj.exists():
             for k, v in json.loads(pj.read_text()).items():
-                if k == "gain":
-                    self.gain.update(v)
+                if k in ("gain", "size_var", "uniform_size"):
+                    getattr(self, k).update(v)
                 else:
                     setattr(self, k, v)
+        # fixed per-class scale = typical glyph size (median of the field), so every
+        # element of a class is the SAME size on the grid (user's "quadradinho" model)
+        self.size_const = {t: float(np.median(self.size[t])) for t in ("0", "1", "blob")}
 
-    def _boot(self, sm, jit=0.25):
-        i = self.rng.integers(len(sm.scores))
-        s = sm.scores[i] + self.rng.standard_normal(len(sm.sdev)) * sm.sdev * jit
-        return sm.coe_to_outline(sm.mean + s @ sm.rotation.T)
+    def _boot(self, sm, jit=0.25, min_sol=0.0):
+        # min_sol>0: reject concave/self-intersecting shapes (blobs should be convex
+        # -> a 'U' has solidity ~0.6; a clean blob ~0.95). Resample until convex.
+        out = None
+        for _ in range(8):
+            i = self.rng.integers(len(sm.scores))
+            s = sm.scores[i] + self.rng.standard_normal(len(sm.sdev)) * sm.sdev * jit
+            out = sm.coe_to_outline(sm.mean + s @ sm.rotation.T)
+            if min_sol <= 0:
+                return out
+            pts = out.astype(np.float32)
+            a = abs(cv2.contourArea(pts))
+            hull = abs(cv2.contourArea(cv2.convexHull(pts)))
+            if hull > 0 and a / hull >= min_sol:
+                return out
+        return out
 
     def _boot0(self, jit=0.25):
         gid = self.common0[self.rng.integers(len(self.common0))]
@@ -107,52 +130,128 @@ class Generator:
                 return size
         return size
 
-    def render(self):
-        W, H = self.s["W"], self.s["H"]
-        nC, nR = self.s["n_cols"], self.s["n_rows"]
-        cov = np.zeros((H, W), np.uint8)            # glyph coverage (255 = glyph)
-        col_c = np.array(self.grid["col_centers"]); row_c = np.array(self.grid["row_centers"])
-        jdx, jdy = self.s["jitter_dx_std"], self.s["jitter_dy_std"]
-        logstd = self.s["size_logstd"]
-        px = self.s["pitch_x"]
+    def _place(self, cov, t, r, c, kernel):
+        """GENERATE one glyph of type t FROM THE MOLD (new shape+size sampled), at
+        cell (r,c) with jitter + collision. Shared by variation and reconstruction;
+        nothing is copied from the original glyph — only its type/cell are honoured."""
         rng = self.rng
+        px, py = self.s["pitch_x"], self.s["pitch_y"]
+        jdx, jdy = self.s["jitter_dx_std"], self.s["jitter_dy_std"]
+        logstd = self.s["size_logstd"]; SAFE = 1.10
+        base = self.size_const[t] if self.uniform_size.get(t) else self.size[t][r, c]
+        lt = logstd[t] + self.size_var[t]
+        size = base * self.gain[t] * np.exp(np.clip(rng.normal(0, lt), -self.var_clip, self.var_clip))
+        cx = self._colc[c] + np.clip(rng.normal(0, jdx), -1.3 * jdx, 1.3 * jdx)
+        cy = self._rowc[r] + np.clip(rng.normal(0, jdy), -1.3 * jdy, 1.3 * jdy)
+        if t == "0":
+            outer, inner = self._boot0()
+            size = min(size, SAFE * py / np.ptp(outer[:, 1]))
+            if self.collision:
+                size = self._fit(outer, cx, cy, size, cov, kernel)
+            cv2.fillPoly(cov, [(outer * size + [cx, cy]).astype(np.int32)], 255, lineType=AA)
+            cv2.fillPoly(cov, [(inner * size + [cx, cy]).astype(np.int32)], 0, lineType=AA)
+        else:
+            out = self._boot(self.sm[t], min_sol=(0.88 if t == "blob" else 0.0))
+            if t == "blob":
+                size = min(size, self.blob_cap * px)
+            size = min(size, SAFE * py / np.ptp(out[:, 1]))
+            if self.collision:
+                size = self._fit(out, cx, cy, size, cov, kernel)
+            cv2.fillPoly(cov, [(out * size + [cx, cy]).astype(np.int32)], 255, lineType=AA)
+            if t == "blob" and c + 1 < self.s["n_cols"] and rng.random() < self.merge[r, c] * self.merge_gain:
+                out2 = self._boot(self.sm["blob"], min_sol=0.88)
+                cv2.fillPoly(cov, [(out2 * size + [cx + 0.62 * px, cy]).astype(np.int32)], 255, lineType=AA)
+
+    def render(self):
+        """Variation: sample occupancy AND type per cell, then GENERATE each glyph."""
+        cov = np.zeros((self.s["H"], self.s["W"]), np.uint8)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * self.gap + 1, 2 * self.gap + 1))
         placed = {"0": 0, "1": 0, "blob": 0}
         occupied = self._sample_occupancy()
         rows, cols = np.where(occupied)
-
-        py = self.s["pitch_y"]
-        SAFE = 1.10  # loose height safety; collision does the real spacing
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * self.gap + 1, 2 * self.gap + 1))
         for r, c in zip(rows.tolist(), cols.tolist()):
             p = self.type_p[:, r, c]; p = p / p.sum()
-            t = rng.choice(("0", "1", "blob"), p=p)
-            lt = logstd[t] + self.size_var[t]
-            size = self.size[t][r, c] * self.gain[t] * np.exp(np.clip(rng.normal(0, lt), -self.var_clip, self.var_clip))
-            # bounded jitter: real glyphs stay within the cell
-            cx = col_c[c] + np.clip(rng.normal(0, jdx), -1.3 * jdx, 1.3 * jdx)
-            cy = row_c[r] + np.clip(rng.normal(0, jdy), -1.3 * jdy, 1.3 * jdy)
-            if t == "0":
-                outer, inner = self._boot0()
-                size = min(size, SAFE * py / np.ptp(outer[:, 1]))
-                if self.collision:
-                    size = self._fit(outer, cx, cy, size, cov, kernel)
-                cv2.fillPoly(cov, [(outer * size + [cx, cy]).astype(np.int32)], 255, lineType=AA)
-                cv2.fillPoly(cov, [(inner * size + [cx, cy]).astype(np.int32)], 0, lineType=AA)
-            else:
-                out = self._boot(self.sm["1" if t == "1" else "blob"])
-                if t == "blob":
-                    size = min(size, self.blob_cap * px)
-                size = min(size, SAFE * py / np.ptp(out[:, 1]))
-                if self.collision:
-                    size = self._fit(out, cx, cy, size, cov, kernel)
-                cv2.fillPoly(cov, [(out * size + [cx, cy]).astype(np.int32)], 255, lineType=AA)
-                # #4 authentic 'W' merge: a 2nd blob deliberately overlapping the
-                # first (NOT collision-checked) -> the only intended touching
-                if t == "blob" and c + 1 < nC and rng.random() < self.merge[r, c] * self.merge_gain:
-                    out2 = self._boot(self.sm["blob"])
-                    cv2.fillPoly(cov, [(out2 * size + [cx + 0.62 * px, cy]).astype(np.int32)], 255, lineType=AA)
+            t = self.rng.choice(("0", "1", "blob"), p=p)
+            self._place(cov, t, r, c, kernel)
             placed[t] += 1
         return cov, placed
+
+    def render_reconstruct(self):
+        """Reconstruction: GENERATE each glyph FROM THE MOLD (new shape+size sampled,
+        from scratch — nothing copied), but honour the ORIGINAL's content: each cell
+        gets the SAME type it has in the original (0/1/blob/empty), never a sampled
+        type. So 'cell has a 0' -> generate a brand-new 0 from the mold in that cell."""
+        comps = json.loads((C.INTERIM / "components_classified.json").read_text())
+        cov = np.zeros((self.s["H"], self.s["W"]), np.uint8)
+        nC, nR = self.s["n_cols"], self.s["n_rows"]
+        px = self.s["pitch_x"]
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * self.gap + 1, 2 * self.gap + 1))
+        placed = {"0": 0, "1": 0, "blob": 0}
+        for c in comps:
+            cls = c["cls"]; r, col = c["row"], c["col"]
+            if not (0 <= r < nR and 0 <= col < nC):
+                continue
+            if cls == "blob_merged":          # original had a fused pair -> blobs in its cells
+                span = max(1, int(round(c["w"] / px)))
+                for s in range(span):
+                    self._place(cov, "blob", r, min(nC - 1, col - span // 2 + s), kernel)
+                    placed["blob"] += 1
+                continue
+            self._place(cov, cls, r, col, kernel)   # generate that exact type, from scratch
+            placed[cls] += 1
+        placed["dot"] = self._draw_small(cov)        # faithful small-dot detail layer
+        return cov, placed
+
+    def _draw_region(self, cov, region, off):
+        """Copy the component's EXACT mask into cov (hard edges, full fill) -> a
+        faithful copy with no AA thinning. `region` is True on the glyph (holes are
+        False, so they stay background)."""
+        x0, y0 = off
+        h, w = region.shape
+        cov[y0:y0 + h, x0:x0 + w][region] = 255
+
+    def _draw_small(self, cov, lo=4, hi=60):
+        """Faithful detail layer: redraw the small specks/dots that the model
+        pipeline drops (area < MIN_AREA). Keeps them out of the shape model but
+        present in the image."""
+        from skimage import measure
+        labels = measure.label(C.binarize(C.load_gray()), connectivity=2)
+        n = 0
+        for p in measure.regionprops(labels):
+            if lo <= p.area < hi:
+                self._draw_region(cov, p.image, [p.bbox[1], p.bbox[0]])
+                n += 1
+        return n
+
+    def render_extraction(self):
+        """Extraction test (≈ copy): re-segment the original and redraw EVERY
+        component (incl. tiny dots) from its exact contour. Maximally faithful;
+        deterministic (seed only names the file)."""
+        from skimage import measure
+        labels = measure.label(C.binarize(C.load_gray()), connectivity=2)
+        W, H = self.s["W"], self.s["H"]
+        cov = np.zeros((H, W), np.uint8)
+        placed = {"0": 0, "1": 0, "blob": 0, "dot": 0}
+        for p in measure.regionprops(labels):
+            if p.area < 4:
+                continue
+            self._draw_region(cov, p.image, [p.bbox[1], p.bbox[0]])
+            minr, minc, maxr, maxc = p.bbox
+            h, w = maxr - minr, maxc - minc
+            if p.area < 60:
+                placed["dot"] += 1
+            elif int(1 - p.euler_number) >= 1:
+                placed["0"] += 1
+            elif w / h < 0.5:
+                placed["1"] += 1
+            else:
+                placed["blob"] += 1
+        # RGB is strictly 2-tone, so the redrawn bgr already equals the original's
+        # RGB; reuse the ORIGINAL's alpha channel (the soft anti-aliased edges we
+        # extract too) -> brightness/halo matches the original exactly.
+        bgr = cov_to_bgr(cov)
+        alpha = cv2.imread(str(C.SRC), cv2.IMREAD_UNCHANGED)[:, :, 3]
+        return np.dstack([bgr, alpha]), placed
 
 
 def cov_to_bgr(cov):
@@ -167,15 +266,41 @@ def cov_to_bgra(cov):
     return np.dstack([cov_to_bgr(cov), (255 - cov).astype(np.uint8)])
 
 
-def render_rgba(gen, seed):
+def render_rgba(gen, seed, mode="variation"):
     gen.rng = np.random.default_rng(seed)
-    cov, placed = gen.render()
+    if mode == "reconstruct":
+        cov, placed = gen.render_reconstruct()
+    elif mode == "extract":
+        return gen.render_extraction()  # returns final BGRA (custom soft alpha)
+    else:
+        cov, placed = gen.render()
     return cov_to_bgra(cov), placed
+
+
+# output filename per mode (all seed-named so each run is a distinct file)
+def out_name(mode, seed):
+    if mode == "reconstruct":
+        return f"reconstruction_seed{seed}.png"
+    if mode == "extract":
+        return f"extraction_seed{seed}.png"
+    return f"generated_seed{seed}.png" if seed != 7 else "generated.png"
 
 
 def main():
     import sys
-    seed = int(sys.argv[1]) if len(sys.argv) > 1 else 7
+    args = sys.argv[1:]
+    MODE = {"reconstruct": "reconstruct", "recon": "reconstruct",
+            "extract": "extract", "extraction": "extract"}
+    if args and args[0] in MODE:
+        mode = MODE[args[0]]
+        seed = int(args[1]) if len(args) > 1 else 0
+        g = Generator(seed=seed)
+        rgba, placed = render_rgba(g, seed, mode=mode)
+        out = C.OUTPUT / out_name(mode, seed)
+        cv2.imwrite(str(out), rgba)
+        print(f"wrote {out}  placed: {placed}")
+        return
+    seed = int(args[0]) if args else 7
     g = Generator(seed=seed)
     cov, placed = g.render()
     out = C.OUTPUT / (f"generated_seed{seed}.png" if seed != 7 else "generated.png")

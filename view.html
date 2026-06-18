@@ -55,6 +55,16 @@
   .handle .knob { width:36px; height:36px; border-radius:50%; background:var(--accent); color:#06210f; display:flex; align-items:center; justify-content:center; font-weight:800; box-shadow:0 2px 10px rgba(0,0,0,.5); }
   .chip { position:absolute; top:10px; padding:4px 9px; font-size:11px; border-radius:6px; background:rgba(0,0,0,.6); color:#cfe; }
   .chip.l { left:10px; } .chip.r { right:10px; }
+  .grid-ov { position:absolute; inset:0; z-index:6; pointer-events:none; }
+  .grid-ov line { stroke: rgba(25,211,107,.30); stroke-width:1; }
+  .grid-ov line.major { stroke: rgba(25,211,107,.6); }
+  .grid-ov text { fill: rgba(190,255,220,.95); font: 30px ui-monospace, monospace; }
+  .grid-ov rect.hl { fill: rgba(255,205,0,.22); stroke:#ffcd00; stroke-width:2; vector-effect:non-scaling-stroke; }
+  .grid-ov rect.sel { fill: rgba(80,170,255,.28); stroke:#4aa3ff; stroke-width:2.5; vector-effect:non-scaling-stroke; }
+  #cellReadout { position:absolute; left:10px; bottom:10px; z-index:8; background:rgba(0,0,0,.8); color:#bfe;
+    padding:6px 11px; border-radius:7px; font-size:13px; font-weight:700; pointer-events:none; border:1px solid var(--line); }
+  #selReadout { position:absolute; left:10px; top:34px; z-index:8; background:rgba(10,40,90,.88); color:#dff;
+    padding:6px 11px; border-radius:7px; font-size:13px; font-weight:700; pointer-events:none; border:1px solid #4aa3ff; }
   .hide { display:none !important; }
   footer { color: var(--muted); font-size: 11.5px; padding: 0 24px 30px; max-width: 980px; }
   code { color:#bfe; }
@@ -88,6 +98,12 @@
     <span class="lbl">gerar</span>
     <input id="seedIn" type="number" placeholder="seed (vazio = aleatório)" />
     <button id="genBtn" class="gen" onclick="generate()">⚡ nova variação</button>
+    <button id="recBtn" class="gen" onclick="generate('/reconstruct')" title="mesmo conteúdo do original, formas novas">🎯 reconstruir</button>
+    <button id="extBtn" class="gen" onclick="generate('/extract')" title="≈ cópia: redesenha pelo contorno extraído de cada glifo">🔬 teste de extração</button>
+  </div>
+  <div class="group">
+    <span class="lbl">grade (slider)</span>
+    <button id="gridBtn" class="on" onclick="toggleGrid()">esconder</button>
   </div>
   <span id="genStatus" class="status"></span>
 </div>
@@ -111,6 +127,9 @@
       <span class="chip l">réplica</span>
       <span class="chip r">original</span>
       <div class="handle" id="handle"><div class="knob">⇄</div></div>
+      <svg id="gridOv" class="grid-ov" preserveAspectRatio="none"></svg>
+      <div id="cellReadout">passe o mouse sobre um quadradinho</div>
+      <div id="selReadout" class="hide"></div>
     </div>
   </section>
 </main>
@@ -131,22 +150,24 @@ function setMode(m){
   document.getElementById('mSlide').classList.toggle('on', m==='slide');
   if(m==='slide') syncSlider();
 }
-async function generate(){
-  const btn=document.getElementById('genBtn'), st=document.getElementById('genStatus');
+const MODE_LABEL = {'/generate':'variação', '/reconstruct':'reconstrução', '/extract':'teste de extração'};
+async function generate(endpoint='/generate'){
+  const btns=document.querySelectorAll('.gen'), st=document.getElementById('genStatus');
+  const label = MODE_LABEL[endpoint] || 'gerado';
   const sv=document.getElementById('seedIn').value.trim();
-  const url='/generate'+(sv!==''?('?seed='+encodeURIComponent(sv)):'');
-  const old=btn.textContent; btn.disabled=true; btn.textContent='gerando…'; st.textContent='';
+  const url=endpoint+(sv!==''?('?seed='+encodeURIComponent(sv)):'');
+  btns.forEach(b=>b.disabled=true); st.textContent = label+'…';
   try{
     const r=await fetch(url); if(!r.ok) throw new Error('HTTP '+r.status);
     const d=await r.json();
     await loadOutputs(d.url.split('?')[0]);   // refresh list + select the new output
     document.getElementById('repImg').src=d.url;   // cache-busted display wins
     document.getElementById('topImg').src=d.url;
-    document.getElementById('repName').textContent='seed '+d.seed;
-    st.textContent='seed '+d.seed+' — '+d.total+' glifos (0:'+d.placed['0']+'  1:'+d.placed['1']+'  blob:'+d.placed['blob']+')';
+    document.getElementById('repName').textContent = label+' · seed '+d.seed;
+    st.textContent=label+' · seed '+d.seed+' — '+d.total+' glifos (0:'+d.placed['0']+'  1:'+d.placed['1']+'  blob:'+d.placed['blob']+')';
   }catch(e){
     st.textContent='erro: '+e.message+' — abra via http://localhost:8000/view.html (servidor FastAPI rodando)';
-  }finally{ btn.disabled=false; btn.textContent=old; }
+  }finally{ btns.forEach(b=>b.disabled=false); }
 }
 function setBg(btn){
   document.querySelectorAll('.bg').forEach(b=>b.classList.remove('on'));
@@ -189,6 +210,109 @@ async function loadOutputs(keep){
   selectOutput(sel.value);
 }
 
+// ---- grid overlay (the "quadradinhos") ----
+let GRID = null;
+function _bounds(c){
+  const b = [c[0] - (c[1]-c[0])/2];
+  for(let i=0;i<c.length-1;i++) b.push((c[i]+c[i+1])/2);
+  b.push(c[c.length-1] + (c[c.length-1]-c[c.length-2])/2);
+  return b;
+}
+function _nearest(arr, v){ let bi=0, bd=1e9; for(let i=0;i<arr.length;i++){const d=Math.abs(arr[i]-v); if(d<bd){bd=d;bi=i;}} return bi; }
+async function loadGrid(){
+  try{
+    GRID = await (await fetch('data/interim/grid.json')).json();
+    GRID.xb = _bounds(GRID.col_centers); GRID.yb = _bounds(GRID.row_centers);
+    drawGrid();
+  }catch(e){ /* grid.json not reachable */ }
+}
+function drawGrid(){
+  if(!GRID) return;
+  const svg = document.getElementById('gridOv');
+  svg.setAttribute('viewBox', `0 0 ${GRID.W} ${GRID.H}`);
+  let s = '';
+  GRID.xb.forEach((x,i) => { s += `<line x1="${x.toFixed(1)}" y1="0" x2="${x.toFixed(1)}" y2="${GRID.H}" class="${i%5===0?'major':''}"/>`; });
+  GRID.yb.forEach((y,i) => { s += `<line x1="0" y1="${y.toFixed(1)}" x2="${GRID.W}" y2="${y.toFixed(1)}" class="${i%5===0?'major':''}"/>`; });
+  for(let i=0;i<GRID.col_centers.length;i+=5) s += `<text x="${GRID.col_centers[i].toFixed(0)}" y="32" text-anchor="middle">${i}</text>`;
+  for(let i=0;i<GRID.row_centers.length;i+=5) s += `<text x="6" y="${(GRID.row_centers[i]+10).toFixed(0)}">${i}</text>`;
+  s += `<rect id="selHl" class="sel hide"/><rect id="cellHl" class="hl hide"/>`;
+  svg.innerHTML = s;
+  drawSelection();
+}
+function cellAt(e){
+  if(!GRID) return null;
+  const r = sw.getBoundingClientRect();
+  const ix = (e.clientX - r.left) / r.width * GRID.W;
+  const iy = (e.clientY - r.top) / r.height * GRID.H;
+  return { col: _nearest(GRID.col_centers, ix), row: _nearest(GRID.row_centers, iy) };
+}
+function toggleGrid(){
+  const sv = document.getElementById('gridOv');
+  const on = sv.classList.toggle('hide') === false;
+  document.getElementById('cellReadout').classList.toggle('hide', !on);
+  document.getElementById('selReadout').classList.toggle('hide', !(on && selA));
+  const b = document.getElementById('gridBtn'); b.textContent = on ? 'esconder' : 'mostrar'; b.classList.toggle('on', on);
+}
+function gridHover(e){
+  if(!GRID || document.getElementById('gridOv').classList.contains('hide')) return;
+  const c = cellAt(e); if(!c) return;
+  document.getElementById('cellReadout').textContent = `linha ${c.row} · coluna ${c.col}`;
+  const hl = document.getElementById('cellHl');
+  if(hl){
+    hl.setAttribute('x', GRID.xb[c.col].toFixed(1)); hl.setAttribute('y', GRID.yb[c.row].toFixed(1));
+    hl.setAttribute('width', (GRID.xb[c.col+1]-GRID.xb[c.col]).toFixed(1));
+    hl.setAttribute('height', (GRID.yb[c.row+1]-GRID.yb[c.row]).toFixed(1));
+    hl.classList.remove('hide');
+  }
+}
+
+// ---- rectangular cell selection: click=anchor, 2nd click=rectangle, Ctrl+C copies ----
+let selA = null, selB = null;
+function selRange(){
+  const r1 = selB ? selB.row : selA.row, c1 = selB ? selB.col : selA.col;
+  return { rMin: Math.min(selA.row, r1), rMax: Math.max(selA.row, r1),
+           cMin: Math.min(selA.col, c1), cMax: Math.max(selA.col, c1) };
+}
+function selText(){
+  if(!selA) return '';
+  const {rMin, rMax, cMin, cMax} = selRange();
+  const nr = rMax - rMin + 1, nc = cMax - cMin + 1;
+  return `[Matrix] linhas ${rMin}–${rMax} × colunas ${cMin}–${cMax} (${nr}×${nc}, ${nr*nc} células)`;
+}
+function drawSelection(){
+  const sh = document.getElementById('selHl'); if(!sh) return;
+  const sr = document.getElementById('selReadout');
+  if(!selA){ sh.classList.add('hide'); sr.classList.add('hide'); return; }
+  const {rMin, rMax, cMin, cMax} = selRange();
+  sh.setAttribute('x', GRID.xb[cMin].toFixed(1)); sh.setAttribute('y', GRID.yb[rMin].toFixed(1));
+  sh.setAttribute('width', (GRID.xb[cMax+1]-GRID.xb[cMin]).toFixed(1));
+  sh.setAttribute('height', (GRID.yb[rMax+1]-GRID.yb[rMin]).toFixed(1));
+  sh.classList.remove('hide');
+  sr.textContent = selText() + (selB ? '  ·  Ctrl+C para copiar' : '  ·  clique a 2ª célula');
+  sr.classList.remove('hide');
+}
+function cellClick(e){
+  if(e.target.closest('.handle')) return;
+  if(!GRID || document.getElementById('gridOv').classList.contains('hide')) return;
+  const c = cellAt(e); if(!c) return;
+  if(!selA || (selA && selB)){ selA = c; selB = null; }  // start a new selection
+  else { selB = c; }                                      // complete the rectangle
+  drawSelection();
+}
+function flashSel(msg){
+  const sr = document.getElementById('selReadout');
+  sr.textContent = msg; sr.classList.remove('hide');
+  setTimeout(() => { if(selA) drawSelection(); }, 1400);
+}
+window.addEventListener('keydown', e => {
+  if(e.key === 'Escape'){ selA = selB = null; drawSelection(); return; }
+  if((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C') && selA){
+    if(window.getSelection && String(window.getSelection())) return;  // let real text copy through
+    navigator.clipboard.writeText(selText()).then(() => flashSel('✓ copiado — cole aqui')).catch(() => {});
+    e.preventDefault();
+  }
+});
+
 // draggable slider
 const sw=document.getElementById('sw'), topEl=document.getElementById('top'), handle=document.getElementById('handle');
 function syncSlider(){
@@ -206,9 +330,10 @@ let drag=false;
 handle.addEventListener('pointerdown',e=>{drag=true; handle.setPointerCapture(e.pointerId);});
 window.addEventListener('pointermove',e=>{ if(drag) setPos(e.clientX); });
 window.addEventListener('pointerup',()=>drag=false);
-sw.addEventListener('click',e=>{ if(e.target.closest('.handle')) return; setPos(e.clientX); });
+sw.addEventListener('mousemove', gridHover);
+sw.addEventListener('click', cellClick);
 window.addEventListener('resize',syncSlider);
-window.addEventListener('load',()=>{ syncSlider(); loadOutputs(); });
+window.addEventListener('load',()=>{ syncSlider(); loadOutputs(); loadGrid(); });
 </script>
 </body>
 </html>

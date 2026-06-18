@@ -4,17 +4,22 @@
   "sigma_v": 0.50,
   "blob_cap": 0.6,
   "merge_gain": 1.8,
-  "var_clip": 0.5,
+  "var_clip": 0.0,
   "gap": 1,
   "overlap_tol": 0,
   "gain": {
-    "0": 1.0,
-    "1": 1.02,
-    "blob": 1.08
+    "0": 1.06,
+    "1": 1.06,
+    "blob": 1.12
+  },
+  "uniform_size": {
+    "0": true,
+    "1": true,
+    "blob": false
   },
   "size_var": {
-    "0": 0.21,
-    "1": 0.35,
-    "blob": 0.10
+    "0": 0.0,
+    "1": 0.0,
+    "blob": 0.0
   }
 }

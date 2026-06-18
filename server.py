@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 sys.path.insert(0, r"C:\matrix\python")
 import common as C            # noqa: E402
-from generate import Generator, render_rgba  # noqa: E402
+from generate import Generator, render_rgba, out_name  # noqa: E402
 
 app = FastAPI(title="Matrix — molde generativo")
 _gen = Generator(seed=0)      # load the mold (shape + layout models) once
@@ -22,21 +22,35 @@ _lock = threading.Lock()      # render() mutates gen.rng -> serialize requests
 _ver = {"n": 0}
 
 
-@app.get("/generate")
-def generate(seed: int | None = None):
+def _run(mode, seed):
     if seed is None:
         seed = random.randint(0, 1_000_000_000)
     with _lock:
-        rgba, placed = render_rgba(_gen, seed)
-        out = C.OUTPUT / f"generated_seed{seed}.png"
+        rgba, placed = render_rgba(_gen, seed, mode=mode)
+        out = C.OUTPUT / out_name(mode, seed)
         cv2.imwrite(str(out), rgba)
         _ver["n"] += 1
-    return JSONResponse({
-        "seed": seed,
-        "placed": placed,
-        "total": int(sum(placed.values())),
-        "url": f"/output/{out.name}?v={_ver['n']}",
-    })
+    return JSONResponse({"seed": seed, "placed": placed,
+                         "total": int(sum(placed.values())),
+                         "url": f"/output/{out.name}?v={_ver['n']}"})
+
+
+@app.get("/generate")
+def generate(seed: int | None = None):
+    """New random variation (each cell's content sampled)."""
+    return _run("variation", seed)
+
+
+@app.get("/reconstruct")
+def reconstruct(seed: int | None = None):
+    """Faithful reconstruction: same type/position as the original, new shapes."""
+    return _run("reconstruct", seed)
+
+
+@app.get("/extract")
+def extract(seed: int | None = None):
+    """Extraction test (≈ copy): redraw each glyph from its exact extracted contour."""
+    return _run("extract", seed)
 
 
 @app.get("/outputs")

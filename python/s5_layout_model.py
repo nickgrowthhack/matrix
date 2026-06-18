@@ -14,7 +14,9 @@ import cv2
 from scipy.ndimage import gaussian_filter
 import common as C
 
-SIGMA = 2.2  # cells, smoothing radius for the fields
+SIGMA = 2.2       # legacy default
+SIGMA_OCC = 1.3   # occupancy/type/merge: sharper -> keeps the dissolve CONTRAST
+SIGMA_SIZE = 2.6  # size field: smooth -> neighbours stay the same size (local uniformity)
 
 
 def rms_radius_by_id(key):
@@ -75,13 +77,12 @@ def main():
         if c["id"] in rms and c["w"] <= 1.3 * px:
             size_acc[base].append((r, k, min(rms[c["id"]], 0.62 * px)))
 
-    # smooth fields
-    occ_s = gaussian_filter(occ, SIGMA, mode="nearest")
-    cnt_s = {t: gaussian_filter(cnt[t], SIGMA, mode="nearest") for t in cnt}
+    # smooth fields: occupancy/type sharper (preserve dissolve contrast)
+    occ_s = gaussian_filter(occ, SIGMA_OCC, mode="nearest")
+    cnt_s = {t: gaussian_filter(cnt[t], SIGMA_OCC, mode="nearest") for t in cnt}
     tot_s = cnt_s["0"] + cnt_s["1"] + cnt_s["blob"] + 1e-6
     type_p = np.stack([cnt_s[t] / tot_s for t in ("0", "1", "blob")])  # (3,nR,nC)
-    merge_s = gaussian_filter(merge, SIGMA, mode="nearest") / (cnt_s["blob"] / (cnt_s["blob"].max() + 1e-6) + 1e-6)
-    merge_s = np.clip(gaussian_filter(merge, SIGMA * 1.5, mode="nearest"), 0, 1)
+    merge_s = np.clip(gaussian_filter(merge, SIGMA_OCC * 1.5, mode="nearest"), 0, 1)
 
     # per-class size fields (mean rms radius) + residual log std
     size_field = {}
@@ -91,8 +92,8 @@ def main():
         fld = np.zeros((nR, nC)); wgt = np.zeros((nR, nC))
         for (r, k, v) in acc:
             fld[r, k] += v; wgt[r, k] += 1
-        num = gaussian_filter(fld, SIGMA, mode="nearest")
-        den = gaussian_filter(wgt, SIGMA, mode="nearest") + 1e-6
+        num = gaussian_filter(fld, SIGMA_SIZE, mode="nearest")
+        den = gaussian_filter(wgt, SIGMA_SIZE, mode="nearest") + 1e-6
         mean_field = num / den
         # fill empties with global mean
         gmean = np.mean([v for _, _, v in acc]) if acc else 20.0
