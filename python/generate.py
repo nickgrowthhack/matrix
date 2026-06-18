@@ -55,6 +55,14 @@ class Generator:
         # per-class: True = one fixed scale (strict "quadradinho" look); False = use
         # the position field. 0/1 are uniform in the source; blobs grow into the dissolve.
         self.uniform_size = {"0": True, "1": True, "blob": False}
+        # RECONSTRUCTION "esvaecimento" (glyphs lose internal ink toward the right):
+        # (1) per-glyph in _place_fit a '0' resizes its HOLE to match its measured
+        #     fill (thick walls left, thin right) — the right tool for 0s;
+        # (2) a gentle rightward EROSION field thins blobs/1s as they dissolve.
+        self.fade = True
+        self.fade_x0 = 0.50     # fraction of width where thinning starts
+        self.fade_k = 3.4       # slope
+        self.fade_max = 2.2     # max erosion (px-ish)
         pj = C.MODEL / "gen_params.json"
         if pj.exists():
             for k, v in json.loads(pj.read_text()).items():
@@ -162,6 +170,44 @@ class Generator:
                 out2 = self._boot(self.sm["blob"], min_sol=0.88)
                 cv2.fillPoly(cov, [(out2 * size + [cx + 0.62 * px, cy]).astype(np.int32)], 255, lineType=AA)
 
+    def _place_fit(self, cov, t, cx, cy, tw, th, fill=None):
+        """RECONSTRUCTION placement: GENERATE a glyph of type t from the mold (new
+        outline sampled), scale its bbox to the target size (tw x th) at (cx,cy abs),
+        AND match the original glyph's FILL ratio (internal ink density, which fades
+        toward the right). Shape = mold; size/position/fill = the original's layout.
+        A '0' matches fill by resizing its HOLE (thicker walls = fuller); a blob/1
+        matches by eroding the solid shape. No collision (dense blobs touch)."""
+        area_box = max(1e-6, tw * th)
+
+        def tf(o, sx, sy, bx, by):
+            return np.column_stack([(o[:, 0] - bx) * sx + cx, (o[:, 1] - by) * sy + cy])
+
+        if t == "0":
+            outer, inner = self._boot0()
+            x, y = outer[:, 0], outer[:, 1]
+            bx = (x.min() + x.max()) / 2.0; by = (y.min() + y.max()) / 2.0
+            sx = tw / max(1e-6, x.max() - x.min()); sy = th / max(1e-6, y.max() - y.min())
+            fo = tf(outer, sx, sy, bx, by); fi = tf(inner, sx, sy, bx, by)
+            if fill is not None:                       # nudge the hole toward target fill:
+                oa = abs(cv2.contourArea(fo.astype(np.float32)))   # smaller hole = thicker
+                ia = abs(cv2.contourArea(fi.astype(np.float32)))   # walls = fuller (left),
+                des_i = oa - fill * area_box                       # bigger = thinner (right)
+                if ia > 60:
+                    # gentle, capped: thicken/thin walls modestly but NEVER close the
+                    # hole (>=60px floor + s>=0.85) so a '0' never turns into a blob
+                    s = 0.85 if des_i <= 0 else min(1.15, max(0.85, (des_i / ia) ** 0.5))
+                    s = max(s, (60.0 / ia) ** 0.5)
+                    fi = (fi - [cx, cy]) * s + [cx, cy]
+            cv2.fillPoly(cov, [fo.astype(np.int32)], 255, lineType=AA)
+            cv2.fillPoly(cov, [fi.astype(np.int32)], 0, lineType=AA)
+            return fi.astype(np.int32)                  # hole, to re-punch after all glyphs
+        else:
+            out = self._boot(self.sm[t], min_sol=(0.88 if t == "blob" else 0.0))
+            x, y = out[:, 0], out[:, 1]
+            bx = (x.min() + x.max()) / 2.0; by = (y.min() + y.max()) / 2.0
+            sx = tw / max(1e-6, x.max() - x.min()); sy = th / max(1e-6, y.max() - y.min())
+            cv2.fillPoly(cov, [tf(out, sx, sy, bx, by).astype(np.int32)], 255, lineType=AA)
+
     def render(self):
         """Variation: sample occupancy AND type per cell, then GENERATE each glyph."""
         cov = np.zeros((self.s["H"], self.s["W"]), np.uint8)
@@ -180,27 +226,46 @@ class Generator:
         """Reconstruction: GENERATE each glyph FROM THE MOLD (new shape+size sampled,
         from scratch — nothing copied), but honour the ORIGINAL's content: each cell
         gets the SAME type it has in the original (0/1/blob/empty), never a sampled
-        type. So 'cell has a 0' -> generate a brand-new 0 from the mold in that cell."""
-        comps = json.loads((C.INTERIM / "components_classified.json").read_text())
+        type. So 'cell has a 0' -> generate a brand-new 0 from the mold in that cell.
+
+        The content map is built per-cell from the validated pixels (s6_content_map),
+        NOT from connected-component->grid assignment — which dropped cells wherever
+        dense blobs merged (leaving holes) and mis-typed a few. Every cell of the grid
+        is honoured here, with no exception."""
+        cm = json.loads((C.INTERIM / "content_map.json").read_text())
         cov = np.zeros((self.s["H"], self.s["W"]), np.uint8)
-        nC, nR = self.s["n_cols"], self.s["n_rows"]
-        px = self.s["pitch_x"]
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * self.gap + 1, 2 * self.gap + 1))
         placed = {"0": 0, "1": 0, "blob": 0}
-        for c in comps:
-            cls = c["cls"]; r, col = c["row"], c["col"]
-            if not (0 <= r < nR and 0 <= col < nC):
-                continue
-            if cls == "blob_merged":          # original had a fused pair -> blobs in its cells
-                span = max(1, int(round(c["w"] / px)))
-                for s in range(span):
-                    self._place(cov, "blob", r, min(nC - 1, col - span // 2 + s), kernel)
-                    placed["blob"] += 1
-                continue
-            self._place(cov, cls, r, col, kernel)   # generate that exact type, from scratch
-            placed[cls] += 1
+        # content map is a flat list of glyph placements (a cell with two narrow
+        # glyphs the grid merged contributes two entries); each is generated from
+        # the mold, fitted to its measured size+position.
+        holes = []
+        for gph in cm["glyphs"]:
+            h = self._place_fit(cov, gph["t"], gph["cx"], gph["cy"], gph["bw"], gph["bh"],
+                                 gph.get("fill"))
+            if h is not None:
+                holes.append(h)
+            placed[gph["t"]] += 1
+        if self.fade:
+            cov = self._apply_fade(cov)              # gentle rightward thinning (blobs/1s)
+        # re-punch the '0' counters LAST so a neighbour glyph drawn over them in the
+        # dense region can't fill them in (else a '0' reads as a solid blob)
+        for h in holes:
+            cv2.fillPoly(cov, [h], 0, lineType=AA)
         placed["dot"] = self._draw_small(cov)        # faithful small-dot detail layer
         return cov, placed
+
+    def _apply_fade(self, cov):
+        """Gentle rightward erosion: blends cov -> eroded per column by a weight that
+        rises toward the right, thinning blobs/1s as they dissolve (0s are matched
+        per-glyph via their hole, so this is a light top-up for the rest)."""
+        W = cov.shape[1]
+        w = np.clip((np.arange(W) / W - self.fade_x0) * self.fade_k, 0, self.fade_max)
+        er1 = cv2.erode(cov, np.ones((3, 3), np.uint8))
+        er2 = cv2.erode(cov, np.ones((5, 5), np.uint8))
+        w1 = np.clip(w, 0, 1)[None, :]; w2 = np.clip(w - 1, 0, 1)[None, :]
+        covf = cov * (1 - w1) + er1 * w1
+        covf = covf * (1 - w2) + er2 * w2
+        return np.clip(covf, 0, 255).astype(np.uint8)
 
     def _draw_region(self, cov, region, off):
         """Copy the component's EXACT mask into cov (hard edges, full fill) -> a
