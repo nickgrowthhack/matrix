@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Matrix — animação (motor = reconstrutor)</title>
+<style>
+  :root { --bg:#0c0e0c; --panel:#161a16; --line:#2a302a; --accent:#19d36b; --muted:#8aa092; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:#e8efe9; font-family: ui-monospace,"Cascadia Code","Consolas",monospace; }
+  header { padding: 18px 24px 6px; }
+  h1 { margin:0; font-size:18px; letter-spacing:.5px; font-weight:600; }
+  h1 .b { color:var(--accent); }
+  p.sub { margin:6px 0 0; color:var(--muted); font-size:12.5px; }
+  p.sub a { color:var(--accent); text-decoration:none; } p.sub a:hover { text-decoration:underline; }
+
+  .controls { display:flex; flex-wrap:wrap; gap:10px; align-items:center;
+    padding:12px 24px; position:sticky; top:0; z-index:5;
+    background:linear-gradient(var(--bg),rgba(12,14,12,.92)); backdrop-filter:blur(4px);
+    border-bottom:1px solid var(--line); }
+  .group { display:flex; gap:0; border:1px solid var(--line); border-radius:8px; overflow:hidden; align-items:stretch; }
+  .group .lbl { padding:8px 10px; color:var(--muted); font-size:12px; align-self:center; }
+  button { background:var(--panel); color:#cfe; border:0; border-left:1px solid var(--line);
+    padding:8px 13px; cursor:pointer; font:inherit; font-size:12.5px; transition:.15s; }
+  button:first-child { border-left:0; }
+  button:hover { background:#1f261f; }
+  button.on { background:var(--accent); color:#06210f; font-weight:700; }
+  .sw { width:20px; height:20px; border-radius:5px; border:1px solid var(--line); display:inline-block; vertical-align:middle; }
+  input[type=number] { background:var(--panel); color:#cfe; border:0; border-left:1px solid var(--line); padding:7px 9px; font:inherit; font-size:12.5px; width:120px; }
+  input[type=range] { accent-color:var(--accent); width:120px; }
+  .status { color:var(--muted); font-size:12px; align-self:center; }
+  main { padding:16px 24px 40px; }
+  .stage { background:#000; border:1px solid var(--line); border-radius:10px; padding:10px; display:flex; justify-content:center; }
+  canvas { display:block; border-radius:4px; }
+  .hint { color:var(--muted); font-size:12px; max-width:1100px; margin:12px auto 0; line-height:1.5; }
+  .hint b { color:#bfe; }
+  code { color:#bfe; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Matrix — <span class="b">animação</span> · motor = reconstrutor</h1>
+  <p class="sub">Mesma fonte da verdade do <a href="view.html">↩ comparador</a>: o
+    <code>content_map.json</code> + as formas do molde (<code>/animation/shapes</code>).
+    A reconstrução é mostrada inteira, com os dados se <b>esvaindo à direita</b>.</p>
+</header>
+
+<div class="controls">
+  <div class="group">
+    <span class="lbl">seed</span>
+    <input id="seedIn" type="number" value="7">
+    <button id="regenBtn" title="novas formas do molde (mesmo conteúdo)">⟳ regerar</button>
+  </div>
+
+  <div class="group" id="themeGroup">
+    <span class="lbl">tema</span>
+    <button class="th on" data-t="fiel" title="exato como o original"><span class="sw" style="background:#ffffff"></span></button>
+    <button class="th" data-t="matrix"><span class="sw" style="background:#2be070"></span></button>
+    <button class="th" data-t="ambar"><span class="sw" style="background:#ffb938"></span></button>
+    <button class="th" data-t="gelo"><span class="sw" style="background:#7fd8ff"></span></button>
+  </div>
+
+  <div class="group">
+    <button id="fadeBtn" class="on" title="esvaecimento para a direita (como o reconstrutor)">esvaecimento</button>
+  </div>
+
+  <span id="status" class="status">carregando…</span>
+</div>
+
+<main>
+  <div class="stage"><canvas id="cv"></canvas></div>
+  <p class="hint" id="hint"></p>
+</main>
+
+<script src="animation.js"></script>
+<script>
+  const THEMES = {
+    matrix: { bg:'#05080a', fg:'#2be070', head:'#d9ffe8' },
+    fiel:   { bg:'#323332', fg:'#ffffff', head:'#ffffff' },
+    ambar:  { bg:'#0a0805', fg:'#ffb938', head:'#fff3d6' },
+    gelo:   { bg:'#04070a', fg:'#7fd8ff', head:'#e8faff' },
+  };
+  function setActive(sel, el) { document.querySelectorAll(sel).forEach(b => b.classList.remove('on')); el.classList.add('on'); }
+
+  document.querySelectorAll('.th').forEach(b => b.onclick = () => {
+    setActive('.th', b); ANIM.setTheme(THEMES[b.dataset.t]);
+  });
+  document.getElementById('regenBtn').onclick = () => ANIM.regenerate(+document.getElementById('seedIn').value || 0);
+  const fadeBtn = document.getElementById('fadeBtn');
+  fadeBtn.onclick = () => { const on = fadeBtn.classList.toggle('on'); ANIM.setFade(on); };
+
+  document.getElementById('hint').textContent = 'A reconstrução é mostrada inteira, na posição/tamanho reais de cada glifo; à direita os dados se esvaem (esvaecimento do reconstrutor). Sem varredura.';
+  ANIM.init({
+    canvas: document.getElementById('cv'),
+    statusEl: document.getElementById('status'),
+  });
+</script>
+</body>
+</html>

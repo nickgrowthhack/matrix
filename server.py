@@ -63,6 +63,35 @@ def outputs():
             for p in files]
 
 
+@app.get("/animation/shapes")
+def animation_shapes(n: int = 96, seed: int = 12345):
+    """Pool of mold-generated outlines per class — the reconstructor's OWN shape
+    engine, exposed so /animation.html can run the same logic live in the browser.
+
+    Each outline is a raw model-space point array (subsampled), so the JS engine
+    scales it per glyph exactly like generate.py:_place_fit. 0s come as aligned
+    outer+inner pairs (so the hole stays registered); blobs carry their fill
+    (area/bbox) so the browser can fill-match (solid left, wispy right)."""
+    import numpy as np
+
+    def ds(o):  # 256-pt outline -> ~52 pts, rounded, as [[x,y],...]
+        return [[round(float(x), 2), round(float(y), 2)] for x, y in o[::5]]
+
+    out = {"0": [], "1": [], "blob": []}
+    with _lock:
+        _gen.rng = np.random.default_rng(seed)
+        for _ in range(n):
+            outer, inner = _gen._boot0()
+            out["0"].append({"outer": ds(outer), "inner": ds(inner)})
+            out["1"].append({"out": ds(_gen._boot(_gen.sm["1"], min_sol=0.0))})
+            ob = _gen._boot(_gen.sm["blob"], min_sol=0.88)
+            pts = ob.astype(np.float32)
+            bb = float((pts[:, 0].max() - pts[:, 0].min()) * (pts[:, 1].max() - pts[:, 1].min()))
+            a = abs(cv2.contourArea(pts))
+            out["blob"].append({"out": ds(ob), "fill": round(a / bb if bb > 0 else 0.83, 3)})
+    return JSONResponse(out)
+
+
 @app.get("/")
 def root():
     return RedirectResponse("/view.html")
